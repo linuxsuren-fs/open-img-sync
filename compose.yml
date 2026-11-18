@@ -1,0 +1,39 @@
+# open-img-sync 容器化运行示例（#8）：
+# 加固配置——只读根文件系统 + tmpfs /tmp + 禁提权 + 资源上限；
+# 主密钥经环境变量注入（也可改用文件挂载 + OIS_MASTER_KEY_FILE 语义见 README）。
+#
+# 使用：
+#   OIS_MASTER_KEY=$(head -c 32 /dev/urandom | base64) docker compose up -d
+services:
+  open-img-sync:
+    image: ghcr.io/linuxsuren/open-img-sync:latest
+    container_name: open-img-sync
+    ports:
+      - "8080:8080"
+    environment:
+      # 凭据主密钥（base64 的 32 字节）；缺省时首启自动生成到 /data/master.key
+      OIS_MASTER_KEY: "${OIS_MASTER_KEY:-}"
+      # 可选：开启 API Bearer 鉴权
+      OIS_TOKEN: "${OIS_TOKEN:-}"
+      OIS_ADDR: ":8080"
+      OIS_DATA_DIR: /data
+    volumes:
+      # 数据目录（bbolt 库与主密钥文件）；read_only 根文件系统下唯一可写卷
+      - ois-data:/data
+    tmpfs:
+      # scratch 层无 /tmp；按运行 UID 挂载，避免默认 root 属主不可写
+      - /tmp:uid=65534,gid=65534,mode=1777
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+        reservations:
+          memory: 128M
+    restart: unless-stopped
+
+volumes:
+  ois-data:

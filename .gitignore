@@ -5,6 +5,10 @@
 bin/
 build/
 dist/
+!web/dist/
+
+# generated from the single source docs/logo.svg at build time
+web/public/logo.svg
 
 # frontend
 web/node_modules/
@@ -17,3 +21,6 @@ web/node_modules/
 .idea/
 .vscode/
 .DS_Store
+
+# playwright artifacts
+web/test-results/

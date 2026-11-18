@@ -1,0 +1,106 @@
+name: CI
+
+# PR 与 master push 触发的质量闸门（#9）：
+# lint → test(-race) → 前端构建与提交产物一致性 → 二进制构建 → Web e2e → 镜像构建验证。
+# `test` 建议设为 required check（分支保护由维护者在 Settings → Branches 开启）。
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: go.sum
+      - name: gofmt check
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "以下文件未通过 gofmt：" >&2
+            echo "$out" >&2
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: go.sum
+      - name: go test -race
+        run: go test -race -timeout 10m ./...
+
+  web:
+    name: Web build & e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm ci & build
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: 提交产物一致性（dist 与源码同步）
+        run: |
+          cd web
+          if ! git diff --quiet -- dist; then
+            echo "web/dist 与前端源码不一致：请运行 make web 并提交产物" >&2
+            git diff --stat -- dist >&2
+            exit 1
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: go.sum
+      - name: Build binary
+        run: go build -trimpath -o bin/open-img-sync ./cmd/open-img-sync
+      - name: Playwright e2e（关键路径）
+        env:
+          OIS_ADDR: 127.0.0.1:18080
+          OIS_DATA_DIR: /tmp/ois-e2e-data
+        run: |
+          mkdir -p "$OIS_DATA_DIR"
+          ./bin/open-img-sync serve &
+          server_pid=$!
+          cd web
+          npx playwright install --with-deps chromium
+          npx playwright test e2e/critical-path.spec.js
+          kill $server_pid
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建镜像（仅验证，不推送）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
