@@ -96,10 +96,12 @@ async function save() {
       <h3 class="dialog__title">{{ title }}</h3>
       <div class="form-grid">
         <div class="form-item">
-          <label for="reg-name">名称</label>`n          <input id="reg-name" v-model="form.name" placeholder="如 docker-hub、aliyun-ee-hz" />
+          <label for="reg-name">名称</label>
+          <input id="reg-name" v-model="form.name" placeholder="如 docker-hub、aliyun-ee-hz" />
         </div>
         <div class="form-item">
-          <label for="reg-addr">地址</label>`n          <input id="reg-addr" v-model="form.address" placeholder="如 registry.example.com:5443，自动补全 https://" />
+          <label for="reg-addr">地址</label>
+          <input id="reg-addr" v-model="form.address" placeholder="如 registry.example.com:5443，自动补全 https://" />
         </div>
         <div class="form-item">
           <label>类型</label>

@@ -84,13 +84,16 @@ async function save() {
       <h3 class="dialog__title">{{ title }}</h3>
       <div class="form-grid">
         <div class="form-item">
-          <label for="srv-name">名称</label>`n          <input id="srv-name" v-model="form.name" placeholder="如 edge-01" />
+          <label for="srv-name">名称</label>
+          <input id="srv-name" v-model="form.name" placeholder="如 edge-01" />
         </div>
         <div class="form-item">
-          <label for="srv-host">主机地址</label>`n          <input id="srv-host" v-model="form.host" placeholder="IP 或域名" />
+          <label for="srv-host">主机地址</label>
+          <input id="srv-host" v-model="form.host" placeholder="IP 或域名" />
         </div>
         <div class="form-item">
-          <label for="srv-port">SSH 端口</label>`n          <input id="srv-port" v-model.number="form.port" type="number" min="1" max="65535" />
+          <label for="srv-port">SSH 端口</label>
+          <input id="srv-port" v-model.number="form.port" type="number" min="1" max="65535" />
         </div>
         <div class="form-item">
           <label>认证方式</label>
@@ -100,7 +103,8 @@ async function save() {
           </select>
         </div>
         <div class="form-item">
-          <label for="srv-user">用户名</label>`n          <input id="srv-user" v-model="form.username" />
+          <label for="srv-user">用户名</label>
+          <input id="srv-user" v-model="form.username" />
         </div>
         <div class="form-item">
           <label>{{ form.auth_type === 'password' ? '密码' : '私钥内容' }}</label>
@@ -115,7 +119,8 @@ async function save() {
           ></textarea>
         </div>
         <div class="form-item span-2">
-          <label for="srv-tags">标签</label>`n          <input id="srv-tags" v-model="form.tags" placeholder="多个标签用英文逗号分隔，如 prod,edge" />
+          <label for="srv-tags">标签</label>
+          <input id="srv-tags" v-model="form.tags" placeholder="多个标签用英文逗号分隔，如 prod,edge" />
         </div>
       </div>
       <div v-if="errMsg" class="form-hint" style="color: var(--color-danger)">{{ errMsg }}</div>
