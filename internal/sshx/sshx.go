@@ -75,35 +75,37 @@ func Dial(ctx context.Context, opt Options) (*Client, error) {
 	}
 	conn, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
-		return nil, classifyDialError(err, timeout)
+		return nil, classifyDialError(err, timeout, addr)
 	}
 	return &Client{conn: conn}, nil
 }
 
-// classifyDialError 把拨号/握手错误映射为稳定错误码。
-func classifyDialError(err error, timeout time.Duration) error {
+// classifyDialError 把拨号/握手错误映射为稳定错误码；提示携带目标地址与超时值，
+// 用户一眼能看出“哪台机器、哪种失败”。
+func classifyDialError(err error, timeout time.Duration, addr string) error {
 	if err == nil {
 		return nil
 	}
+	timeoutText := fmt.Sprintf("，上限 %s", timeout)
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "unable to authenticate"),
 		strings.Contains(msg, "no supported methods remain"):
-		return errs.Wrap(CodeAuthFailed, "SSH 认证失败", err)
+		return errs.Wrap(CodeAuthFailed, "SSH 认证失败（"+addr+"）：账号或私钥被拒绝", err)
 	case isTimeoutErr(err), strings.Contains(msg, "i/o timeout"):
-		return errs.Wrap(CodeTimeout, "连接超时", err)
+		return errs.Wrap(CodeTimeout, "SSH 连接超时（"+addr+timeoutText+"）：目标机无响应", err)
 	case strings.Contains(msg, "connection refused"),
 		strings.Contains(msg, "no route to host"),
 		strings.Contains(msg, "unreachable"),
 		strings.Contains(msg, "Unknown user"):
-		return errs.Wrap(CodeUnreachable, "服务器不可达", err)
+		return errs.Wrap(CodeUnreachable, "服务器不可达（"+addr+"）：连接被拒绝或无路由", err)
 	default:
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			return errs.Wrap(CodeTimeout, "连接超时", err)
+			return errs.Wrap(CodeTimeout, "SSH 连接超时（"+addr+timeoutText+"）：目标机无响应", err)
 		}
 		// 其余网络类错误统一归为不可达，根因进日志
-		return errs.Wrap(CodeUnreachable, "服务器不可达", err)
+		return errs.Wrap(CodeUnreachable, "服务器不可达（"+addr+"）", err)
 	}
 }
 

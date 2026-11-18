@@ -299,7 +299,11 @@ func (e *Engine) run(rs *runState, taskID string) {
 	snapshot := e.snapshotTask(rs)
 	rs.mu.Unlock()
 	_ = e.persist(snapshot)
-	rs.logs.append("info", fmt.Sprintf("任务开始：模式 %s，%d 镜像 × %d 目标", mode, len(refs), len(targets)))
+	modeText := "SSH 直推"
+	if mode == model.ModeM2 {
+		modeText = "中转 registry"
+	}
+	rs.logs.append("info", fmt.Sprintf("任务开始：模式 %s（%s），%d 镜像 × %d 目标", mode, modeText, len(refs), len(targets)))
 
 	limit := e.Concurrency
 	if limit <= 0 {
@@ -445,8 +449,13 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, idx int) {
 		}
 		lastErr = err
 		bizErr := errs.From(err)
-		rs.logs.append("warn", fmt.Sprintf("失败（第 %d 次）%s → %s：%s",
-			attempt+1, ref, targetName, bizErr.Message))
+		phase := phaseOf(err)
+		phasePart := ""
+		if phase != "" {
+			phasePart = "，阶段：" + phase
+		}
+		rs.logs.append("warn", fmt.Sprintf("失败（第 %d/%d 次尝试%s）→ %s：%s",
+			attempt+1, maxRetries+1, phasePart, targetName, bizErr.Message))
 		if attempt < maxRetries {
 			backoff := time.Duration(1<<uint(attempt)) * time.Second
 			select {
@@ -475,6 +484,32 @@ func (e *Engine) runStep(ctx context.Context, rs *runState, idx int) {
 // errSkipped 幂等命中信号。
 var errSkipped = errors.New("skipped")
 
+// phaseError 携带失败发生时的阶段（供日志与用户提示定位）。
+type phaseError struct {
+	phase string
+	err   error
+}
+
+func (e *phaseError) Error() string { return e.err.Error() }
+func (e *phaseError) Unwrap() error { return e.err }
+
+// withPhase 给错误标注阶段；nil 原样返回。
+func withPhase(phase string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &phaseError{phase: phase, err: err}
+}
+
+// phaseOf 提取错误链中的阶段标注。
+func phaseOf(err error) string {
+	var pe *phaseError
+	if errors.As(err, &pe) {
+		return pe.phase
+	}
+	return ""
+}
+
 // executeStep 单次执行：解析来源 → 拉取 manifest → 幂等检查 → M1/M2 传输。
 func (e *Engine) executeStep(ctx context.Context, rs *runState, idx int, ref string) error {
 	rs.mu.Lock()
@@ -502,12 +537,10 @@ func (e *Engine) executeStep(ctx context.Context, rs *runState, idx int, ref str
 		return err
 	}
 	repo := parsed.Repository
-	if parsed.Registry != "" && srcReg.Address != "" {
-		// 引用带 host 时以登记的 registry 地址为准，仓库取路径部分
-	}
+	rs.logs.append("info", "拉取 manifest "+ref)
 	manifestBody, manifestDigest, mediaType, err := srcClient.GetManifest(ctx, repo, parsed.Tag)
 	if err != nil {
-		return mapSourceError(err)
+		return withPhase("拉取 manifest", mapSourceError(err))
 	}
 	if registry.IsIndex(mediaType) {
 		idxList, err := registry.ParseIndex(manifestBody)
@@ -518,7 +551,7 @@ func (e *Engine) executeStep(ctx context.Context, rs *runState, idx int, ref str
 		child := registry.SelectPlatform(idxList, goos, goarch)
 		manifestBody, manifestDigest, mediaType, err = srcClient.GetManifest(ctx, repo, child)
 		if err != nil {
-			return mapSourceError(err)
+			return withPhase("拉取平台 manifest", mapSourceError(err))
 		}
 	}
 	if manifestDigest == "" {
@@ -542,6 +575,8 @@ func (e *Engine) pushM1(ctx context.Context, rs *runState, src *registry.Client,
 	if !ok {
 		return errs.New(errs.CodeNotFound, "目标服务器不存在")
 	}
+	targetAddr := fmt.Sprintf("%s:%d", srvRec.Host, srvRec.Port)
+	rs.logs.append("info", "目标机 "+targetName+"（"+targetAddr+"）")
 	secret, err := e.Secrets.Open(srvRec.SecretSealed)
 	if err != nil {
 		return err
@@ -553,20 +588,22 @@ func (e *Engine) pushM1(ctx context.Context, rs *runState, src *registry.Client,
 	case model.AuthPrivateKey:
 		opt.PrivateKey = secret
 	}
+	rs.logs.append("info", "连接目标机 "+targetAddr)
 	conn, err := e.SSHFactory(ctx, opt)
 	if err != nil {
-		return err
+		return withPhase("连接目标机 "+targetAddr, err)
 	}
 	defer conn.Close()
 
 	repoTag := repo + ":" + tag
+	rs.logs.append("info", "检查目标机已有镜像 "+repoTag)
 	has, err := conn.HasDigest(ctx, repoTag, digest)
 	if err == nil && has {
 		return errSkipped
 	}
 	sess, err := conn.StartStream(ctx, "docker load")
 	if err != nil {
-		return err
+		return withPhase("启动目标机 docker load", err)
 	}
 	lw := archive.NewLoadWriter(sess.Stdin())
 
@@ -574,18 +611,18 @@ func (e *Engine) pushM1(ctx context.Context, rs *runState, src *registry.Client,
 	cfgRC, _, err := src.OpenBlob(ctx, repo, m.Config.Digest, 0)
 	if err != nil {
 		sess.Close()
-		return mapSourceError(err)
+		return withPhase("下载镜像配置", mapSourceError(err))
 	}
 	cfgBytes := make([]byte, m.Config.Size)
 	if _, err := readFull(cfgRC, cfgBytes); err != nil {
 		cfgRC.Close()
 		sess.Close()
-		return errs.Wrap(CodeTransferStop, "传输中断", err)
+		return withPhase("下载镜像配置", errs.Wrap(CodeTransferStop, "传输中断", err))
 	}
 	cfgRC.Close()
 	if err := lw.WriteConfig(m.Config.Digest, cfgBytes); err != nil {
 		sess.Close()
-		return errs.Wrap(CodeTransferStop, "传输中断", err)
+		return withPhase("写入 docker load 流", errs.Wrap(CodeTransferStop, "传输中断", err))
 	}
 	rs.progress(int64(len(cfgBytes)))
 
@@ -597,29 +634,60 @@ func (e *Engine) pushM1(ctx context.Context, rs *runState, src *registry.Client,
 	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
 		return errs.Wrap(errs.CodeInternal, "创建缓存目录失败", err)
 	}
-	for _, layer := range m.Layers {
+	total := len(m.Layers)
+	var totalBytes int64
+	for _, l := range m.Layers {
+		totalBytes += l.Size
+	}
+	rs.logs.append("info", fmt.Sprintf("开始传输 %d 层（共 %s）", total, humanBytes(totalBytes)))
+	for i, layer := range m.Layers {
 		if ctx.Err() != nil {
 			sess.Close()
 			return ctx.Err()
 		}
+		rs.logs.append("info", fmt.Sprintf("下载第 %d/%d 层 %s", i+1, total, shortDigest(layer.Digest)))
 		if err := e.spoolLayer(ctx, src, rs, repo, layer, spoolDir, lw); err != nil {
 			sess.Close()
-			return err
+			return withPhase(fmt.Sprintf("下载第 %d/%d 层", i+1, total), err)
 		}
 	}
 	if err := lw.Finish(repoTag, m.Config.Digest, layerDigests(m)); err != nil {
 		sess.Close()
-		return errs.Wrap(CodeTransferStop, "传输中断", err)
+		return withPhase("写入 docker load 流", errs.Wrap(CodeTransferStop, "传输中断", err))
 	}
 	// 关闭 stdin 表示输入完毕；远端已结束时的 EOF 不是错误
 	_ = sess.Stdin().Close()
+	rs.logs.append("info", "等待目标机 docker load 完成")
 	waitErr := sess.Wait()
 	sess.Close()
 	if waitErr != nil {
 		// 远端 docker load 失败：错误归因（磁盘满/其他）已在 sshx 分类
-		return waitErr
+		return withPhase("目标机 docker load", waitErr)
 	}
+	rs.logs.append("info", "目标机加载完成 "+repoTag)
 	return nil
+}
+
+// shortDigest 缩短 digest 便于日志阅读（sha256:abc… 前 19 字符）。
+func shortDigest(digest string) string {
+	if len(digest) > 19 {
+		return digest[:19] + "…"
+	}
+	return digest
+}
+
+// humanBytes 字节数人性化（日志展示用）。
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func layerDigests(m *registry.ImageManifest) []string {
@@ -672,34 +740,36 @@ func (e *Engine) pushM2(ctx context.Context, rs *runState, src *registry.Client,
 	if !ok {
 		return errs.New(errs.CodeNotFound, "中转 registry 不存在")
 	}
+	rs.logs.append("info", "中转 registry "+relay.Name+"（"+relay.Address+"）")
 	dst, err := e.registryClient(relay)
 	if err != nil {
 		return err
 	}
+	rs.logs.append("info", "检查中转已有镜像 "+repo+":"+tag)
 	if exists, _ := dst.HeadManifest(ctx, repo, digest); exists {
 		return errSkipped
 	}
 	// config + layers
 	blobs := append([]registry.Descriptor{m.Config}, m.Layers...)
-	for _, b := range blobs {
+	for i, b := range blobs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		has, err := dst.BlobExists(ctx, repo, b.Digest)
 		if err != nil {
-			return errs.Wrap(CodeRelayPushFail, "推送中转 registry 失败", nil)
+			return withPhase("检查中转镜像层", errs.Wrap(CodeRelayPushFail, "推送中转 registry 失败", nil))
 		}
 		if has {
 			continue // 已存在层跳过（幂等）
 		}
 		blobRC, size, err := src.OpenBlob(ctx, repo, b.Digest, 0)
 		if err != nil {
-			return mapSourceError(err)
+			return withPhase("拉取镜像层", mapSourceError(err))
 		}
 		location, err := dst.InitiateUpload(ctx, repo)
 		if err != nil {
 			blobRC.Close()
-			return err
+			return withPhase("发起中转上传", err)
 		}
 		counted := &countReadCloser{rc: blobRC, f: rs.progress}
 		if size <= 0 {
@@ -707,12 +777,13 @@ func (e *Engine) pushM2(ctx context.Context, rs *runState, src *registry.Client,
 		}
 		if err := dst.PutBlob(ctx, location, b.Digest, size, counted); err != nil {
 			counted.Close()
-			return err
+			return withPhase(fmt.Sprintf("推送第 %d/%d 层到中转", i+1, len(blobs)), err)
 		}
 		counted.Close()
 	}
+	rs.logs.append("info", "推送 manifest 到中转 "+repo+":"+tag)
 	if err := dst.PutManifest(ctx, repo, tag, mediaType, manifestBody); err != nil {
-		return err
+		return withPhase("推送中转 manifest", err)
 	}
 	return nil
 }

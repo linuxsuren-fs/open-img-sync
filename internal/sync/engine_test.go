@@ -668,6 +668,18 @@ func TestSingleTargetFailureIsolation(t *testing.T) {
 	if byTarget["bad"].Status != model.StepFailed {
 		t.Fatalf("坏目标应失败: %+v", byTarget["bad"])
 	}
+
+	// 日志可读性（用户反馈）：失败行必须带阶段与目标地址，能定位“哪一步、哪台机”
+	lines, _ := env.engine.LogsSince(task.ID, 0)
+	joined := ""
+	for _, l := range lines {
+		joined += l.Line + "\n"
+	}
+	for _, want := range []string{"阶段：连接目标机 127.0.0.1:1", "模式 m1（SSH 直推）", "目标机 bad（127.0.0.1:1）"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("日志应包含 %q，实际日志：\n%s", want, joined)
+		}
+	}
 }
 
 func TestConcurrencyLimit(t *testing.T) {
