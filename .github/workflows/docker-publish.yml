@@ -85,3 +85,4 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
+            COMMIT=${{ github.sha }}

@@ -36,13 +36,14 @@ COPY --from=web /src/web/dist ./web/dist
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
+ARG COMMIT=none
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath \
       -ldflags "-s -w \
         -X github.com/linuxsuren/open-img-sync/internal/cli.version=${VERSION} \
-        -X github.com/linuxsuren/open-img-sync/internal/cli.commit=$(git rev-parse --short HEAD 2>/dev/null || echo none)" \
+        -X github.com/linuxsuren/open-img-sync/internal/cli.commit=${COMMIT}" \
       -o /out/open-img-sync ./cmd/open-img-sync \
     && mkdir -p /out/data
 
