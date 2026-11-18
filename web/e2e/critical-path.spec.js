@@ -16,7 +16,7 @@ test('关键路径：服务器 → 镜像清单 → 同步任务 → 步骤与�
   await page.getByRole('button', { name: '保存' }).click()
   await expect(page.getByText('服务器已创建')).toBeVisible()
   // 凭据只回显掩码
-  await expect(page.getByText('ssh-****')).toBeVisible()
+  await expect(page.getByText('ssh-****').first()).toBeVisible()
 
   // ---- 建镜像源 + 批量录入 ----
   await page.getByRole('button', { name: '镜像源' }).click()
@@ -26,7 +26,7 @@ test('关键路径：服务器 → 镜像清单 → 同步任务 → 步骤与�
   await page.getByRole('button', { name: '保存' }).click()
   await expect(page.getByText('镜像源已创建')).toBeVisible()
 
-  await page.getByRole('button', { name: '镜像清单' }).click()
+  await page.getByRole('row', { name: 'src-e2e' }).getByRole('button', { name: '镜像清单' }).click()
   await page.getByRole('button', { name: '批量录入' }).click()
   await page.getByPlaceholder(/每行一个镜像引用/).fill('nginx\nBAD:REF')
   await page.getByRole('button', { name: '录入' }).click()
@@ -55,4 +55,17 @@ test('总览与系统页可见', async ({ page }) => {
   await page.getByRole('button', { name: '系统' }).click()
   await expect(page.getByText('版本信息')).toBeVisible()
   await expect(page.getByText('主密钥来源')).toBeVisible()
+})
+
+test('切换页签后刷新保持在当前页', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: '同步任务' }).click()
+  await expect(page.locator('.shell__tab--active')).toHaveText('同步任务')
+  await page.reload()
+  // hash 记住了所在页：刷新后仍在同步任务页
+  await expect(page.locator('.shell__tab--active')).toHaveText('同步任务')
+  await expect(page.getByText('发起同步')).toBeVisible()
+  // 浏览器返回：hash 回退到上一页
+  await page.goBack()
+  await expect(page.locator('.shell__tab--active')).toHaveText('总览')
 })

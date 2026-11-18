@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { getVersion } from './api.js'
 import ServersView from './views/ServersView.vue'
 import RegistriesView from './views/RegistriesView.vue'
@@ -7,7 +7,6 @@ import TasksView from './views/TasksView.vue'
 import OverviewView from './views/OverviewView.vue'
 import SystemView from './views/SystemView.vue'
 
-const view = ref('overview')
 const views = [
   { key: 'overview', label: '总览' },
   { key: 'servers', label: '服务器' },
@@ -15,15 +14,39 @@ const views = [
   { key: 'tasks', label: '同步任务' },
   { key: 'system', label: '系统' },
 ]
+const validKeys = new Set(views.map(v => v.key))
+
+// 当前页落在地址 hash（#/servers），刷新与分享链接后保持所在页；
+// 未引路由库，仅用 hash 存当前 tab。
+function viewFromHash() {
+  const key = window.location.hash.replace(/^#\/?/, '')
+  return validKeys.has(key) ? key : 'overview'
+}
+const view = ref(viewFromHash())
+function switchTo(key) {
+  view.value = key
+  window.location.hash = '/' + key
+}
+function onHashChange() {
+  // 空 hash（如浏览器回退到初始地址）回默认页；非法值同样回落
+  view.value = viewFromHash()
+}
 
 const version = ref('')
 onMounted(async () => {
+  window.addEventListener('hashchange', onHashChange)
+  // 部分浏览器回退到无 hash 的 URL 不触发 hashchange，popstate 兜底
+  window.addEventListener('popstate', onHashChange)
   try {
     const v = await getVersion()
     version.value = v.version || ''
   } catch {
     version.value = ''
   }
+})
+onUnmounted(() => {
+  window.removeEventListener('hashchange', onHashChange)
+  window.removeEventListener('popstate', onHashChange)
 })
 </script>
 
@@ -39,7 +62,7 @@ onMounted(async () => {
         <button
           v-for="v in views" :key="v.key"
           class="shell__tab" :class="{ 'shell__tab--active': view === v.key }"
-          @click="view = v.key"
+          @click="switchTo(v.key)"
         >{{ v.label }}</button>
       </nav>
     </header>
