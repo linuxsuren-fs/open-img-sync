@@ -4,12 +4,16 @@ import { test, expect } from '@playwright/test'
 // 目标地址与源 registry 都指向必然失败的地址，验证的是完整 UI 链路与
 // 稳定错误码呈现（不依赖外部容器，CI 友好）。
 test('关键路径：服务器 → 镜像清单 → 同步任务 → 步骤与日志', async ({ page }) => {
+  // 每次运行用唯一名称，避免历史数据让定位器命中多元素
+  const run = Date.now().toString().slice(-6)
+  const serverName = `edge-e2e-${run}`
+  const registryName = `src-e2e-${run}`
   await page.goto('/')
 
   // ---- 建服务器 ----
   await page.getByRole('button', { name: '服务器' }).click()
   await page.getByRole('button', { name: '新建服务器' }).click()
-  await page.getByLabel('名称').fill('edge-e2e')
+  await page.getByLabel('名称').fill(serverName)
   await page.getByLabel('主机地址').fill('127.0.0.1')
   await page.getByLabel('用户名').fill('root')
   await page.getByPlaceholder('新建时必须填写凭据').or(page.locator('input[type=password]')).first().fill('e2e-password')
@@ -21,23 +25,27 @@ test('关键路径：服务器 → 镜像清单 → 同步任务 → 步骤与�
   // ---- 建镜像源 + 批量录入 ----
   await page.getByRole('button', { name: '镜像源' }).click()
   await page.getByRole('button', { name: '新建镜像源' }).click()
-  await page.getByLabel('名称').fill('src-e2e')
+  await page.getByLabel('名称').fill(registryName)
   await page.getByLabel('地址').fill('http://127.0.0.1:1')
   await page.getByRole('button', { name: '保存' }).click()
   await expect(page.getByText('镜像源已创建')).toBeVisible()
 
-  await page.getByRole('row', { name: 'src-e2e' }).getByRole('button', { name: '镜像清单' }).click()
+  await page.getByRole('row', { name: registryName }).getByRole('button', { name: '镜像清单' }).click()
+  // 长地址等内容不得撑出页面横向边界
+  const overflowed = await page.evaluate(() =>
+    document.documentElement.scrollWidth > window.innerWidth + 1)
+  if (overflowed) throw new Error('页面出现横向溢出')
   await page.getByRole('button', { name: '批量录入' }).click()
   await page.getByPlaceholder(/每行一个镜像引用/).fill('nginx\nBAD:REF')
   await page.getByRole('button', { name: '录入' }).click()
-  await expect(page.getByText('nginx:latest 已录入')).toBeVisible()
-  await expect(page.getByText(/第 2 行/)).toBeVisible()
-  await expect(page.getByText('nginx:latest', { exact: true })).toBeVisible()
+  await expect(page.getByText('nginx:latest 已录入').first()).toBeVisible()
+  await expect(page.getByText(/第 2 行/).first()).toBeVisible()
+  await expect(page.getByText('nginx:latest', { exact: true }).first()).toBeVisible()
 
   // ---- 发起同步 ----
   await page.getByRole('button', { name: '同步任务' }).click()
-  await page.getByRole('checkbox').first().check() // 镜像
-  await page.getByRole('checkbox').nth(1).check() // 服务器（同一样式）
+  await page.locator('.check-group__section', { hasText: registryName }).locator('input[type=checkbox]').first().check()
+  await page.locator('.check-item', { hasText: serverName }).locator('input[type=checkbox]').first().check()
   await page.getByRole('button', { name: '开始同步' }).click()
   await expect(page.getByText(/任务已创建/)).toBeVisible()
 

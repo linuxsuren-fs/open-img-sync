@@ -61,6 +61,8 @@ button { font-family: inherit; }
   box-shadow: var(--shadow-panel);
   padding: var(--space-4);
   margin-top: var(--space-4);
+  /* 宽表格在卡片内滚动，不溢出页面边界 */
+  overflow-x: auto;
 }
 
 .block__title {
@@ -79,6 +81,13 @@ button { font-family: inherit; }
 .table th { color: var(--color-text-dim); font-weight: 500; font-size: 13px; }
 .table td { color: var(--color-text-primary); }
 .table .num { font-family: var(--font-mono); }
+/* 长文本列（地址、说明等）：允许换行，避免撑破容器 */
+.table .wrap {
+  white-space: normal;
+  word-break: break-all;
+  min-width: 200px;
+  max-width: 360px;
+}
 
 /* 表单 */
 .form-item { margin-bottom: var(--space-3); }

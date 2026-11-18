@@ -123,7 +123,7 @@ function roleText(r) {
           <template v-for="row in rows" :key="row.id">
             <tr>
               <td>{{ row.name }}</td>
-              <td class="num">{{ row.address }}</td>
+              <td class="num wrap">{{ row.address }}</td>
               <td>{{ typeText(row.type) }}</td>
               <td>{{ roleText(row.role) }}</td>
               <td>{{ row.username || (row.aliyun && row.aliyun.instance ? row.aliyun.instance : '—') }}</td>
@@ -132,7 +132,7 @@ function roleText(r) {
                 <span v-else-if="row.aliyun && row.aliyun.ak_mask" class="num">{{ row.aliyun.ak_mask }}</span>
                 <span v-else class="form-hint">匿名</span>
               </td>
-              <td>
+              <td class="wrap">
                 <span v-if="testResults[row.id]" :class="testResults[row.id].ok ? 'tag--success' : 'tag--failed'" class="tag">
                   {{ testResults[row.id].message || errorText(testResults[row.id].code) }}
                 </span>
