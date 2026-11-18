@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +43,19 @@ func NewProvider(secrets *store.SecretBox) *Provider {
 	return &Provider{Secrets: secrets, cache: map[string]Token{}}
 }
 
+// DeriveRegion 从 ACR 实例域名推导地域：<实例>.<地域>.cr.aliyuncs.com → <地域>。
+// 非该形式返回空串。
+func DeriveRegion(address string) string {
+	lower := strings.ToLower(address)
+	m := regionFromHost.FindStringSubmatch(lower)
+	if len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
+
+var regionFromHost = regexp.MustCompile(`\.([a-z0-9]+(?:-[a-z0-9]+)+)\.cr\.aliyuncs\.com`)
+
 // Fetch 返回该 registry 的有效临时凭据：缓存命中且未进入刷新窗口则直接复用，
 // 否则换取新凭据（并发调用串行化，同一 key 只换取一次）。
 func (p *Provider) Fetch(ctx context.Context, reg model.RegistryRecord) (Token, error) {
@@ -51,6 +66,14 @@ func (p *Provider) Fetch(ctx context.Context, reg model.RegistryRecord) (Token, 
 	sk, err := p.Secrets.Open(reg.Aliyun.SKSealed)
 	if err != nil {
 		return Token{}, errs.From(err)
+	}
+	region := strings.TrimSpace(reg.Aliyun.Region)
+	if region == "" {
+		region = DeriveRegion(reg.Address)
+	}
+	if region == "" {
+		return Token{}, errs.New(CodeFetchFailed,
+			"临时凭据获取失败：未配置地域，且无法从地址识别（地址应为 <实例>.<地域>.cr.aliyuncs.com 形式，或在配置中填写地域，如 cn-beijing）")
 	}
 	key := reg.ID + "/" + reg.Aliyun.AKFingerprint
 
@@ -64,9 +87,9 @@ func (p *Provider) Fetch(ctx context.Context, reg model.RegistryRecord) (Token, 
 		return cached, nil // 缓存命中，不重复换取
 	}
 
-	client := &Client{AK: ak, SK: sk, Region: reg.Aliyun.Region}
+	client := &Client{AK: ak, SK: sk, Region: region, Instance: strings.TrimSpace(reg.Aliyun.Instance)}
 	if p.EndpointFor != nil {
-		client.Endpoint = p.EndpointFor(reg.Aliyun.Region)
+		client.Endpoint = p.EndpointFor(region)
 	}
 	tok, err := client.GetAuthorizationToken(ctx)
 	if err != nil {

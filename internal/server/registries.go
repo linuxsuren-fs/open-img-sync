@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linuxsuren/open-img-sync/internal/aliyun"
 	"github.com/linuxsuren/open-img-sync/internal/crypt"
 	"github.com/linuxsuren/open-img-sync/internal/errs"
 	"github.com/linuxsuren/open-img-sync/internal/model"
@@ -68,6 +69,10 @@ func (s *Server) validateRegistryInput(in model.RegistryInput, existing *model.R
 				return errs.New(errs.CodeBadRequest, "aliyun-temp 类型必须提供 AccessKey ID 与 Secret")
 			}
 		}
+		// 实例名是 GetAuthorizationToken 必填参数（MissingInstanceId）
+		if existing == nil && strings.TrimSpace(in.Aliyun.Instance) == "" {
+			return errs.New(errs.CodeBadRequest, "aliyun-temp 类型必须提供实例名（如 cri-xxxx）")
+		}
 	}
 	return nil
 }
@@ -95,6 +100,12 @@ func (s *Server) handleRegistryCreate(w http.ResponseWriter, r *http.Request) {
 	if err := s.applyRegistrySecrets(&rec, in); err != nil {
 		s.writeErr(w, errs.From(err))
 		return
+	}
+	// aliyun-temp：地域留空时从实例地址自动推导（<实例>.<地域>.cr.aliyuncs.com）
+	if rec.Type == model.RegistryTypeAliyunTemp && strings.TrimSpace(rec.Aliyun.Region) == "" {
+		if derived := aliyun.DeriveRegion(rec.Address); derived != "" {
+			rec.Aliyun.Region = derived
+		}
 	}
 	if err := s.deps.DB.Put(bucketRegistries, rec.ID, mustJSON(rec)); err != nil {
 		s.writeErr(w, errs.Wrap(errs.CodeInternal, "保存失败", err))
@@ -234,6 +245,12 @@ func (s *Server) handleRegistryUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec.UpdatedAt = s.now()
+	// aliyun-temp：地域留空时从实例地址自动推导（<实例>.<地域>.cr.aliyuncs.com）
+	if rec.Type == model.RegistryTypeAliyunTemp && strings.TrimSpace(rec.Aliyun.Region) == "" {
+		if derived := aliyun.DeriveRegion(rec.Address); derived != "" {
+			rec.Aliyun.Region = derived
+		}
+	}
 	if err := s.deps.DB.Put(bucketRegistries, rec.ID, mustJSON(rec)); err != nil {
 		s.writeErr(w, errs.Wrap(errs.CodeInternal, "保存失败", err))
 		return
@@ -300,7 +317,9 @@ func (s *Server) handleRegistryTest(w http.ResponseWriter, r *http.Request) {
 		}
 		username, secret = tok.Username, tok.Password
 	}
-	res := registry.Ping(rec.Address, username, secret)
+	// PingV2 走 Client 探测：自动处理 Bearer 挑战（ACR EE / Docker Hub 形态）
+	pingClient := registry.NewClient(rec.Address, username, secret)
+	res := pingClient.PingV2(r.Context())
 	slog.Info("registry test", "registry_id", rec.ID, "code", res.Code) // 不落任何凭据
 	writeJSON(w, http.StatusOK, res)
 }

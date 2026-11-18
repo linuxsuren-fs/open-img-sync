@@ -4,8 +4,8 @@
 
 ## 配置步骤
 
-1. 在「Registry 管理」中创建类型为 `aliyun-temp` 的 registry，地址填实例域名，例如 `https://xxx-registry.cn-hangzhou.cr.aliyuncs.com`
-2. 填入阿里云配置：`region`（如 `cn-hangzhou`）、`instance`（实例名，如 `xxx-registry`）、RAM 用户的 AccessKey ID 与 Secret
+1. 在「镜像源」中创建类型为 `aliyun-temp` 的 registry，地址填实例域名，例如 `https://xxx-registry.cn-hangzhou.cr.aliyuncs.com`
+2. 填入阿里云配置：`region`（如 `cn-hangzhou`，**可留空**——会从 `<实例>.<地域>.cr.aliyuncs.com` 形式的地址自动识别）、`instance`（实例名）、RAM 用户的 AccessKey ID 与 Secret
 3. AK/SK 以 AES-256-GCM 加密存储（见 #10），任何界面与日志只出现掩码 `ak-****`
 
 ## RAM 最小授权策略
@@ -49,7 +49,7 @@
 | 1001 | AccessKey 无效 / 签名不匹配（InvalidAccessKeyId.* / SignatureDoesNotMatch） |
 | 1002 | 未授权该实例（Forbidden.* / NoPermission / AccessDenied） |
 | 1003 | 接口限流（Throttling / RequestLimitExceeded） |
-| 1004 | 其他获取失败（网络、响应损坏等） |
+| 1004 | 其他获取失败，提示会区分：未配置地域且地址无法识别 / 无法连接阿里云接口（含端点主机名）/ 时间戳无效（检查系统时间）/ 请求重放 / 参数不合法 / 阿里云服务不可用 / 未识别错误码（附阿里云错误码） |
 
 ## 缓存与刷新
 

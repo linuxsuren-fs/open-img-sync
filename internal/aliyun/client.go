@@ -38,17 +38,23 @@ type Client struct {
 	// Region 例如 cn-hangzhou；Endpoint 非空时优先（测试注入 fake 服务）
 	Region   string
 	Endpoint string
+	// Instance ACR 企业版实例 ID（如 cri-xxxx）；GetAuthorizationToken 必填
+	Instance string
 	HTTP     *http.Client
 	Now      func() time.Time
 	Nonce    func() string
 }
 
+// tokenResponse 对应 ACR EE GetAuthorizationToken 的真实扁平结构：
+// {"IsSuccess":true,"RequestId":"...","AuthorizationToken":"<base64 user:pass>",
+//
+//	"TempUserName":"...","ExpireTime":<epoch>}
 type tokenResponse struct {
-	AuthorizationToken struct {
-		AuthorizationToken string `json:"AuthorizationToken"`
-		TempUserName       string `json:"TempUserName"`
-		ExpireTime         int64  `json:"ExpireTime"` // epoch 秒
-	} `json:"AuthorizationToken"`
+	IsSuccess          bool        `json:"IsSuccess"`
+	Code               string      `json:"Code"`
+	AuthorizationToken string      `json:"AuthorizationToken"`
+	TempUserName       string      `json:"TempUserName"`
+	ExpireTime         json.Number `json:"ExpireTime"`
 }
 
 type apiError struct {
@@ -63,6 +69,15 @@ func (c *Client) EndpointURL() string {
 		return strings.TrimRight(c.Endpoint, "/") + "/"
 	}
 	return fmt.Sprintf("https://cr.%s.aliyuncs.com/", c.Region)
+}
+
+// endpointHost 返回端点主机名（错误提示用）。
+func (c *Client) endpointHost() string {
+	raw := c.EndpointURL()
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return raw
 }
 
 // GetAuthorizationToken 换取临时登录凭据（base64 token 解为 username:password）。
@@ -85,6 +100,10 @@ func (c *Client) GetAuthorizationToken(ctx context.Context) (Token, error) {
 		"SignatureNonce":   nonce(),
 		"Timestamp":        now().UTC().Format("2006-01-02T15:04:05Z"),
 	}
+	// ACR 企业版必填实例 ID（cri-xxxx）
+	if c.Instance != "" {
+		params["InstanceId"] = c.Instance
+	}
 	_, signature := SignRPC(c.AK, c.SK, params)
 	params["Signature"] = signature
 
@@ -105,12 +124,13 @@ func (c *Client) GetAuthorizationToken(ctx context.Context) (Token, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return Token{}, errs.Wrap(CodeFetchFailed, "临时凭据获取失败", err)
+		return Token{}, errs.Wrap(CodeFetchFailed,
+			"临时凭据获取失败：无法连接阿里云接口 "+c.endpointHost()+"，请检查网络与地域配置", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return Token{}, errs.Wrap(CodeFetchFailed, "临时凭据获取失败", err)
+		return Token{}, errs.Wrap(CodeFetchFailed, "临时凭据获取失败：响应读取中断", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -118,26 +138,52 @@ func (c *Client) GetAuthorizationToken(ctx context.Context) (Token, error) {
 		if json.Unmarshal(body, &apiErr) == nil && apiErr.Code != "" {
 			return Token{}, classifyAPIError(apiErr.Code)
 		}
-		return Token{}, errs.Wrap(CodeFetchFailed, "临时凭据获取失败",
+		return Token{}, errs.Wrap(CodeFetchFailed,
+			fmt.Sprintf("临时凭据获取失败：接口返回异常（HTTP %d），详情见服务日志", resp.StatusCode),
 			fmt.Errorf("http %d: %s", resp.StatusCode, truncate(string(body), 200)))
 	}
 	var parsed tokenResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return Token{}, errs.Wrap(CodeFetchFailed, "临时凭据获取失败", err)
+		return Token{}, errs.Wrap(CodeFetchFailed, "临时凭据获取失败：响应无法解析，详情见服务日志", err)
 	}
-	raw := parsed.AuthorizationToken.AuthorizationToken
-	user, pass, ok := decodeBasicToken(raw)
-	if !ok || user == "" || pass == "" {
-		return Token{}, errs.New(CodeFetchFailed, "临时凭据获取失败")
+	if !parsed.IsSuccess {
+		if parsed.Code != "" {
+			return Token{}, classifyAPIError(parsed.Code)
+		}
+		return Token{}, errs.Wrap(CodeFetchFailed, "临时凭据获取失败：接口返回未成功",
+			fmt.Errorf("body: %s", truncate(string(body), 200)))
 	}
+	user, pass, ok := decodeBasicToken(parsed.AuthorizationToken)
+	if !ok {
+		// 个别实例不回 base64 token：退回 TempUserName + token 作为密码
+		if parsed.TempUserName != "" && parsed.AuthorizationToken != "" {
+			user, pass = parsed.TempUserName, parsed.AuthorizationToken
+		} else {
+			return Token{}, errs.New(CodeFetchFailed, "临时凭据获取失败：响应缺少凭据字段")
+		}
+	}
+	expire := parseExpire(parsed.ExpireTime)
 	return Token{
 		Username:   user,
 		Password:   pass,
-		ExpireTime: time.Unix(parsed.AuthorizationToken.ExpireTime, 0),
+		ExpireTime: expire,
 	}, nil
 }
 
+// parseExpire 兼容秒/毫秒两种 epoch 口径（>1e12 视为毫秒）。
+func parseExpire(n json.Number) time.Time {
+	v, err := n.Int64()
+	if err != nil || v <= 0 {
+		return time.Now().Add(50 * time.Minute) // 无法解析时按保守 50 分钟计
+	}
+	if v > 1e12 {
+		return time.UnixMilli(v)
+	}
+	return time.Unix(v, 0)
+}
+
 // classifyAPIError 把阿里云错误码映射为稳定错误码（1001/1002/1003/1004）。
+// 未识别的错误码在提示中带上阿里云错误码，便于排查（技术细节仍只进日志）。
 func classifyAPIError(code string) error {
 	switch {
 	case strings.Contains(code, "InvalidAccessKeyId"), strings.Contains(code, "SignatureDoesNotMatch"):
@@ -147,8 +193,18 @@ func classifyAPIError(code string) error {
 		return errs.New(CodeNoAuth, "AccessKey 未授权该 ACR 实例")
 	case strings.Contains(code, "Throttling"), strings.Contains(code, "RequestLimitExceeded"):
 		return errs.New(CodeRateLimited, "阿里云接口限流，请稍后重试")
+	case strings.Contains(code, "MissingInstanceId"):
+		return errs.New(CodeFetchFailed, "临时凭据获取失败：未携带实例 ID，请补全阿里云实例名（如 cri-xxxx）后重试")
+	case strings.Contains(code, "InvalidTimeStamp"), strings.Contains(code, "InvalidTimeRange"):
+		return errs.New(CodeFetchFailed, "临时凭据获取失败：请求时间戳无效，请检查服务器系统时间")
+	case strings.Contains(code, "SignatureNonceUsed"):
+		return errs.New(CodeFetchFailed, "临时凭据获取失败：请求被判定重放，请重试")
+	case strings.Contains(code, "MissingParameter"), strings.Contains(code, "InvalidParameter"):
+		return errs.New(CodeFetchFailed, "临时凭据获取失败：请求参数不合法（错误码 "+code+"），详情见服务日志")
+	case strings.Contains(code, "InternalError"), strings.Contains(code, "ServiceUnavailable"):
+		return errs.New(CodeFetchFailed, "临时凭据获取失败：阿里云服务暂时不可用，请稍后重试")
 	default:
-		return errs.New(CodeFetchFailed, "临时凭据获取失败")
+		return errs.New(CodeFetchFailed, "临时凭据获取失败（阿里云错误码 "+code+"），详情见服务日志")
 	}
 }
 

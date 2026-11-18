@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -53,17 +54,162 @@ func startFakeACR(t *testing.T, scenario func(r *http.Request) (int, string)) *f
 	return f
 }
 
+// okTokenBody 按真实响应结构（顶层扁平）构造 GetAuthorizationToken 成功响应。
 func okTokenBody(username, password string, expireEpoch int64) string {
 	basic := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 	resp := map[string]any{
-		"AuthorizationToken": map[string]any{
-			"AuthorizationToken": basic,
-			"TempUserName":       username,
-			"ExpireTime":         expireEpoch,
-		},
+		"IsSuccess":          true,
+		"AuthorizationToken": basic,
+		"TempUserName":       username,
+		"ExpireTime":         expireEpoch,
 	}
 	raw, _ := json.Marshal(resp)
 	return string(raw)
+}
+
+func TestDeriveRegion(t *testing.T) {
+	cases := map[string]string{
+		"https://fstech-registry.cn-beijing.cr.aliyuncs.com":   "cn-beijing",
+		"fstech-registry.cn-hangzhou.cr.aliyuncs.com":          "cn-hangzhou",
+		"https://demo-registry.ap-southeast-1.cr.aliyuncs.com": "ap-southeast-1",
+		"https://registry.example.com":                         "",
+		"https://cr.aliyuncs.com":                              "",
+		"":                                                     "",
+	}
+	for in, want := range cases {
+		if got := DeriveRegion(in); got != want {
+			t.Errorf("DeriveRegion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestProviderRegionFromAddress：地域留空时从地址推导，端点不再指向空 region。
+func TestProviderRegionFromAddress(t *testing.T) {
+	var gotPath string
+	var gotQuery url.Values
+	f := startFakeACR(t, func(r *http.Request) (int, string) {
+		gotPath = r.URL.Path
+		_ = r.ParseForm()
+		gotQuery = r.Form
+		return 200, okTokenBody("u", "p", time.Now().Add(time.Hour).Unix())
+	})
+	key, _, err := crypt.LoadMasterKey(crypt.MasterKeyConfig{EnvVar: "OIS_TEST_KEY_UNUSED", FilePath: t.TempDir() + "/master.key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := store.NewSecretBox(crypt.NewBox(key))
+	akSealed, _ := secrets.Seal("ak")
+	skSealed, _ := secrets.Seal("sk")
+	reg := model.RegistryRecord{
+		ID: "reg-1", Type: model.RegistryTypeAliyunTemp,
+		Address: "https://fstech-registry.cn-beijing.cr.aliyuncs.com",
+		Aliyun:  model.AliyunConfig{AKSealed: akSealed, SKSealed: skSealed}, // Region 故意留空
+	}
+	p := NewProvider(secrets)
+	p.EndpointFor = func(region string) string {
+		if region != "cn-beijing" {
+			t.Errorf("推导出的 region = %q, want cn-beijing", region)
+		}
+		return f.server.URL
+	}
+	tok, err := p.Fetch(context.Background(), reg)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if tok.Username != "u" || gotPath != "/" || gotQuery.Get("Action") != "GetAuthorizationToken" {
+		t.Fatalf("tok=%+v path=%q", tok, gotPath)
+	}
+}
+
+// TestProviderMissingRegion：地域无法确定时给出可操作提示。
+func TestProviderMissingRegion(t *testing.T) {
+	key, _, err := crypt.LoadMasterKey(crypt.MasterKeyConfig{EnvVar: "OIS_TEST_KEY_UNUSED", FilePath: t.TempDir() + "/master.key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := store.NewSecretBox(crypt.NewBox(key))
+	akSealed, _ := secrets.Seal("ak")
+	skSealed, _ := secrets.Seal("sk")
+	reg := model.RegistryRecord{
+		ID: "reg-2", Type: model.RegistryTypeAliyunTemp,
+		Address: "https://registry.internal", // 无地域可推导
+		Aliyun:  model.AliyunConfig{AKSealed: akSealed, SKSealed: skSealed},
+	}
+	p := NewProvider(secrets)
+	_, err = p.Fetch(context.Background(), reg)
+	if err == nil {
+		t.Fatal("应报错")
+	}
+	var e *errs.E
+	if !errors.As(err, &e) || e.Code != CodeFetchFailed {
+		t.Fatalf("code 异常: %v", err)
+	}
+	if !strings.Contains(e.Message, "地域") {
+		t.Fatalf("提示应包含地域指引: %q", e.Message)
+	}
+}
+
+func TestClassifyAPIErrorMessages(t *testing.T) {
+	cases := []struct {
+		code       string
+		wantCode   int
+		wantSubstr string
+	}{
+		{"InvalidTimeStamp.Expired", CodeFetchFailed, "时间戳"},
+		{"SignatureNonceUsed", CodeFetchFailed, "重放"},
+		{"InvalidParameter.RegionId", CodeFetchFailed, "参数不合法"},
+		{"InternalError", CodeFetchFailed, "暂时不可用"},
+		{"SomeWeirdCode.X", CodeFetchFailed, "SomeWeirdCode.X"},
+		{"InvalidAccessKeyId.NotFound", CodeAKInvalid, "AccessKey"},
+		{"Forbidden.RAM", CodeNoAuth, "未授权"},
+	}
+	for _, c := range cases {
+		err := classifyAPIError(c.code)
+		e, ok := err.(*errs.E)
+		if !ok || e.Code != c.wantCode {
+			t.Errorf("classify(%q) code = %v, want %d", c.code, err, c.wantCode)
+			continue
+		}
+		if !strings.Contains(e.Message, c.wantSubstr) {
+			t.Errorf("classify(%q) message = %q, want substr %q", c.code, e.Message, c.wantSubstr)
+		}
+	}
+}
+
+// TestClientSendsInstanceId：ACR EE 的 GetAuthorizationToken 必须携带 InstanceId。
+func TestClientSendsInstanceId(t *testing.T) {
+	expire := time.Now().Add(time.Hour).Unix()
+	var gotForm url.Values
+	f := startFakeACR(t, func(r *http.Request) (int, string) {
+		_ = r.ParseForm()
+		gotForm = r.Form
+		return 200, okTokenBody("u", "p", expire)
+	})
+	c := &Client{AK: "ak", SK: "sk", Region: "cn-beijing", Instance: "cri-abc123", Endpoint: f.server.URL}
+	if _, err := c.GetAuthorizationToken(context.Background()); err != nil {
+		t.Fatalf("GetAuthorizationToken: %v", err)
+	}
+	if gotForm.Get("InstanceId") != "cri-abc123" {
+		t.Fatalf("InstanceId = %q, want cri-abc123（ACR EE 必填）", gotForm.Get("InstanceId"))
+	}
+}
+
+// TestClientOmitsInstanceIdWhenEmpty：无私钥实例（个人版地址）时不发送空参数。
+func TestClientOmitsInstanceIdWhenEmpty(t *testing.T) {
+	expire := time.Now().Add(time.Hour).Unix()
+	var gotForm url.Values
+	f := startFakeACR(t, func(r *http.Request) (int, string) {
+		_ = r.ParseForm()
+		gotForm = r.Form
+		return 200, okTokenBody("u", "p", expire)
+	})
+	c := &Client{AK: "ak", SK: "sk", Region: "cn-beijing", Endpoint: f.server.URL}
+	if _, err := c.GetAuthorizationToken(context.Background()); err != nil {
+		t.Fatalf("GetAuthorizationToken: %v", err)
+	}
+	if gotForm.Get("InstanceId") != "" {
+		t.Fatalf("InstanceId 应省略, got %q", gotForm.Get("InstanceId"))
+	}
 }
 
 func TestClientGetTokenSuccess(t *testing.T) {
