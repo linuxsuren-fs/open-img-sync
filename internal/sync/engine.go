@@ -331,7 +331,10 @@ func (e *Engine) run(rs *runState, taskID string) {
 		case <-done:
 			persistLoop = false
 		case <-ticker.C:
-			_ = e.persist(e.snapshotTask(rs))
+			rs.mu.Lock()
+			snapshot := e.snapshotTask(rs)
+			rs.mu.Unlock()
+			_ = e.persist(snapshot)
 		case <-ctx.Done():
 			// 等待在途步骤退出
 			<-done
